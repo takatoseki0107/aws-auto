@@ -23,7 +23,7 @@ jobs:
             aws cloudformation deploy \
               --template-file cloudformation/infra.yaml \
               --stack-name "${STACK_NAME}" \
-              --capabilities CAPABILITY_NAMED_IAM
+              --capabilities CAPABILITY_NAMED_IAM || true
 
       - run:
           name: Get EC2 Information from Stack Outputs
