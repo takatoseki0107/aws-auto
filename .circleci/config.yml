@@ -1,0 +1,88 @@
+version: 2.1
+
+jobs:
+  deploy:
+    docker:
+      - image: cimg/python:3.11
+    environment:
+      AWS_DEFAULT_REGION: ap-northeast-1
+      STACK_NAME: web-ssm-demo
+    steps:
+      - checkout
+
+      - run:
+          name: Install AWS CLI, Ansible, and dependencies
+          command: |
+            pip install --upgrade pip
+            pip install awscli boto3 botocore ansible-core
+            ansible-galaxy collection install amazon.aws
+
+      - run:
+          name: Validate & Deploy CloudFormation Stack
+          command: |
+            aws cloudformation deploy \
+              --template-file cloudformation/infra.yaml \
+              --stack-name "${STACK_NAME}" \
+              --capabilities CAPABILITY_NAMED_IAM
+
+      - run:
+          name: Get EC2 Information from Stack Outputs
+          command: |
+            INSTANCE_ID=$(aws cloudformation describe-stacks \
+              --stack-name "${STACK_NAME}" \
+              --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
+              --output text)
+            PUBLIC_DNS=$(aws cloudformation describe-stacks \
+              --stack-name "${STACK_NAME}" \
+              --query "Stacks[0].Outputs[?OutputKey=='PublicDNSName'].OutputValue" \
+              --output text)
+            echo "INSTANCE_ID=${INSTANCE_ID}" >> $BASH_ENV
+            echo "PUBLIC_DNS=${PUBLIC_DNS}" >> $BASH_ENV
+
+      - run:
+          name: Wait for SSM Agent to be Ready
+          command: |
+            echo "⏳ Waiting for SSM Agent to become available..."
+            for i in {1..30}; do
+              ONLINE=$(aws ssm describe-instance-information \
+                --query "InstanceInformationList[?InstanceId=='${INSTANCE_ID}'] | length(@)" \
+                --output text)
+              if [ "$ONLINE" = "1" ]; then
+                echo "✅ SSM Agent is ready!"
+                break
+              fi
+              echo "Still waiting... ($i/30)"
+              sleep 10
+            done
+
+      - run:
+          name: Create Temporary Ansible Inventory
+          command: |
+            mkdir -p ansible/inventory
+            echo "[web]" > ansible/inventory/hosts.ini
+            echo "${INSTANCE_ID} ansible_connection=aws_ssm" >> ansible/inventory/hosts.ini
+            cat ansible/inventory/hosts.ini
+
+      - run:
+          name: Run Ansible Playbook
+          command: |
+            ansible-playbook -i ansible/inventory/hosts.ini ansible/site.yml
+
+      - run:
+          name: Smoke Test - Check Nginx HTTP 200
+          command: |
+            echo "🌐 Running smoke test against: http://${PUBLIC_DNS}"
+            for i in {1..30}; do
+              code=$(curl -s -o /dev/null -w "%{http_code}" "http://${PUBLIC_DNS}")
+              echo "HTTP status: $code"
+              [ "$code" = "200" ] && exit 0
+              sleep 5
+            done
+            echo "❌ Web server did not respond with 200 OK" && exit 1
+
+workflows:
+  version: 2
+  deploy-on-push:
+    jobs:
+      - deploy
+
